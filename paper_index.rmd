@@ -1,0 +1,354 @@
+---
+title: "Description"
+author: "V. Salamalikis (vsal@nilu.no)"
+date: "Last generated: `r format(Sys.Date(), '%B %Y')`"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+#knit: (function(inputFile, encoding) { 
+#      out_dir <- '../docs/';
+#      rmarkdown::render(inputFile,
+#                        encoding=encoding, 
+#                        output_file=file.path(dirname(inputFile), out_dir, 'index.html'))})
+editor_options: 
+  markdown: 
+    wrap: 80
+---
+
+```{r global_options, include=FALSE}
+#knitr::opts_chunk$set(fig.width=12, fig.height=8, fig.path='../Figs/index/',warning=FALSE, message=FALSE)
+```
+
+```{r load_packages, include=FALSE}
+require(highcharter)
+require(dplyr)
+require(readr)
+require(lubridate)
+require(IDPmisc)
+require(tidyr)
+require(plyr)
+require(reshape2)
+require(kableExtra)
+require(htmltools)
+```
+
+This folder includes sample scripts to analyze the relationship between indoor and outdoor fine air particulate matter (PM<sub>2.5</sub>) collected using low-cost sensors (LCSs). 
+The generated results were partly presented in the paper <i>Citizen-Operated Low-Cost Sensors for Estimating Outdoor Particulate Matter Infiltration</i> submitted in npj | Climate and Atmospheric Science.
+
+Finally, this document presents an explanation of the different analysis conducted.
+
+# Data analysis conducted for the study
+
+The following points have been investigated:
+
+-   Initial exploratory data analysis
+
+-   Peak detection in indoor PM<sub>2.5</sub> time series
+
+-   Calculation of the temporal infiltration factor using rolling statistics 
+
+-   Calculation of the "general" infiltration factor using distributed-lag linear models
+
+
+The above points are discussed in detail in the next sections.
+
+# Low-cost sensors data
+
+Both indoor and outdoor low-cost air quality sensors provide air particulates and meteorological information. The following parameters are reported:
+
+-   Air particulate matter with diameter less than 2.5 &mu;m, PM<sub>2.5</sub> (&mu;g m<sup>-3</sup>)
+
+-   Air Temperature, T (&deg;C) 
+
+-   Relative Humidity, RH (%)
+
+-   Surface Pressure, P (hPa)
+
+The methodology is evaluated using the <i>sample_data.csv</i>. The dataset includes both indoor and outdoor measurements from January 2022 to February 2023. 
+
+```{r}
+sample.data <- read_csv('C:/Data/sample_data.csv',show_col_types = FALSE)
+```
+
+# Initial data exploratory analysis
+
+
+## Indoor and Outdoor PM<sub>2.5</sub> concentrations
+
+```{r}
+highchart(type = "stock") %>% 
+  hc_xAxis(type = "datetime") %>%
+  hc_yAxis(title = list(useHTML = TRUE, text = 'PM<sub>2.5</sub> (&mu;g m<sup>-3</sup>)'), opposite = FALSE) %>%
+  hc_add_series(name='Indoor PM<sub>2.5</sub>', data = sample.data, hcaes(x=datetime_to_timestamp(timestamp),y=pm2.5), type = "line", color='#0073C2FF') %>%
+  hc_add_series(name='Outdoor PM<sub>2.5</sub>', data = sample.data, hcaes(x=datetime_to_timestamp(timestamp),y=pm2.5_out), type = "line", color= '#EFC000FF') %>%
+  hc_tooltip(useHTML=TRUE, headerFormat=NULL, pointFormat = '{point.x:%Y-%m-%d %H:%M} <br> PM<sub>2.5</sub>: {point.y:.1f}  &mu;g m<sup>-3</sup>') %>%
+  hc_legend(useHTML=TRUE, enabled = TRUE)
+#
+# descriptive statistics
+descriptive_stats <- reshape2::melt(sample.data %>% dplyr::select(timestamp, pm2.5, pm2.5_out) %>% dplyr::rename(`Indoor PM<sub>2.5</sub>` = 'pm2.5',`Outdoor PM<sub>2.5</sub>` = 'pm2.5_out'),id.vars='timestamp') %>% group_by(variable) %>%
+  dplyr::summarise(
+    Count = sum(!is.na(value)),
+    Min = round(min(value, na.rm=TRUE),1),
+    `Q<sub>25%</sub>` = round(quantile(value, 0.25, na.rm=TRUE),1),
+    Median = round(median(value, na.rm=TRUE),1),
+    Mean = round(mean(value, na.rm=TRUE),1),
+    `Q<sub>75%</sub>` = round(quantile(value, 0.75, na.rm=TRUE),1),
+    Max = round(max(value, na.rm=TRUE),1),
+    SD = round(sd(value, na.rm=TRUE),1),
+    IQR = round(IQR(value, na.rm=TRUE),1)
+  ) %>% 
+  dplyr::rename(Parameter = variable)
+kable(descriptive_stats, format = 'html', escape = FALSE, caption = "Descriptive Statistics for indoor and outdoor PM<sub>2.5</sub>") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive"), full_width = T)
+```
+The diurnal (intra-day) distribution of the indoor PM<sub>2.5</sub> time series is analyzed in the following graph for: 
+
+-   Heating Period: October - April
+
+-   Non-Heating Period: May - September 
+
+```{r}
+sample.data <- sample.data %>% 
+  mutate(Month = month(timestamp),
+         Hour = hour(timestamp),
+         Period = ifelse(Month %in% 5:9,'Non-Heating Period', 'Heating Period'))
+sample.data.diurnal <- sample.data %>% 
+  group_by(Period, Hour) %>% 
+  dplyr::summarize(pm2.5_diurnal = round(mean(pm2.5, na.rm=TRUE),1),
+            .groups = 'drop')
+#
+highchart() %>% 
+  hc_xAxis(categories = as.character(pull(sample.data.diurnal, 'Hour')), title = list(text = "Hour of the Day")) %>%
+  hc_yAxis(title = list(useHTML = TRUE, text = 'PM<sub>2.5</sub> (&mu;g m<sup>-3</sup>)'), opposite = FALSE) %>%
+  hc_add_series(data = sample.data.diurnal, hcaes(x=Hour,y=pm2.5_diurnal, group=Period), type = "column") %>%
+  hc_tooltip(useHTML=TRUE, headerFormat=NULL, pointFormat = 'Hour: {point.x:.0f} <br> PM<sub>2.5</sub>: {point.y:.1f} &mu;g m<sup>-3</sup>') %>%
+  hc_legend(useHTML=TRUE, enabled = TRUE) %>%
+  hc_colors(c('#0073C2FF','#EFC000FF'))
+```
+
+The diurnal (intra-day) distribution of the outdoor PM<sub>2.5</sub> time series is analyzed in the following graph for: 
+
+-   Heating Period: October - April
+
+-   Non-Heating Period: May - September 
+
+```{r}
+sample.data <- sample.data %>% 
+  mutate(Month = month(timestamp),
+         Hour = hour(timestamp),
+         Period = ifelse(Month %in% 5:9,'Non-Heating Period', 'Heating Period'))
+sample.data.diurnal <- sample.data %>% 
+  group_by(Period, Hour) %>% 
+  dplyr::summarize(pm2.5_out_diurnal = round(mean(pm2.5_out, na.rm=TRUE),1),.groups = 'drop')
+#
+highchart() %>% 
+  hc_xAxis(categories = as.character(pull(sample.data.diurnal, 'Hour')), title = list(text = "Hour of the Day")) %>%
+  hc_yAxis(title = list(useHTML = TRUE, text = 'PM<sub>2.5</sub> (&mu;g m<sup>-3</sup>)'), opposite = FALSE) %>%
+  hc_add_series(data = sample.data.diurnal, hcaes(x=Hour,y=pm2.5_out_diurnal, group=Period), type = "column") %>%
+  hc_tooltip(useHTML=TRUE, headerFormat=NULL, pointFormat = 'Hour: {point.x:.0f} <br> PM<sub>2.5</sub>: {point.y:.1f} &mu;g m<sup>-3</sup>') %>%
+  hc_legend(useHTML=TRUE, enabled = TRUE) %>%
+  hc_colors(c('#0073C2FF','#EFC000FF'))
+```
+
+## Indoor/Outdoor concentration ratio
+
+An initial step to analyze the relationship between the indoor and outdoor PM<sub>2.5</sub> is to calculate the respective ratio: 
+
+$$\frac{I}{O} = \frac{C_{\text{in}}(t)}{C_{\text{out}}(t)}$$
+
+```{r}
+highchart(type = "stock") %>% 
+  hc_title(title=list(useHTML = TRUE, text = "Hourly Time Series of indoor PM<sub>2.5</sub>")) %>%
+  hc_xAxis(type = "datetime") %>%
+  hc_yAxis(title = list(useHTML = TRUE, text = 'I/O ratio'), opposite = FALSE) %>%
+  hc_add_series(data = sample.data, hcaes(x=datetime_to_timestamp(timestamp),y=pm2.5/pm2.5_out), type = "line", color= '#0073C2FF') %>%
+  hc_tooltip(useHTML=TRUE, headerFormat=NULL, pointFormat = '{point.x:%Y-%m-%d %H:%M} <br> I/O ratio: {point.y:.1f}') %>%
+  hc_legend(useHTML=TRUE, enabled = FALSE)
+```
+
+The diurnal distribution of $\frac{I}{O}$ is retrieved by grouping the concentrations at each calendar hour and 
+dividing the average indoor PM<sub>2.5</sub> to that of outdoor: 
+
+$$\overline{(\frac{I}{O})} = \frac{\overline{C_{\text{in}}}}{\overline{C_{\text{out}}}}$$
+
+```{r}
+sample.data <- sample.data %>% 
+  mutate(Month = month(timestamp),
+         Hour = hour(timestamp),
+         Period = ifelse(Month %in% 5:9,'Non-Heating Period', 'Heating Period'))
+sample.data.diurnal <- sample.data %>% 
+  group_by(Period, Hour) %>% 
+  dplyr::summarize(pm2.5 = round(mean(pm2.5, na.rm=TRUE),1),
+            pm2.5_out_diurnal = round(mean(pm2.5_out, na.rm=TRUE),1),
+            io_diurnal = round(pm2.5/pm2.5_out_diurnal,1),
+            .groups = 'drop')
+#
+highchart() %>% 
+  hc_xAxis(categories = as.character(pull(sample.data.diurnal, 'Hour')), title = list(text = "Hour of the Day")) %>%
+  hc_yAxis(title = list(useHTML = TRUE, text = 'I/O ratio'), opposite = FALSE) %>%
+  hc_add_series(data = sample.data.diurnal, hcaes(x=Hour,y=io_diurnal, group=Period), type = "column") %>%
+  hc_tooltip(useHTML=TRUE, headerFormat=NULL, pointFormat = 'Hour: {point.x:.0f} <br> I/O ratio: {point.y:.1f}') %>%
+  hc_legend(useHTML=TRUE, enabled = TRUE) %>%
+  hc_colors(c('#0073C2FF','#EFC000FF'))
+```
+
+## Detection of indoor emission events
+
+Indoor emission events are detected using the Robust Extraction of Baseline Signal (REBS) methodology of Ruckstuhl et al., 2012. The indoor concentration time series can be decomposed as: 
+
+$$C_{\text{in}}(t) = C_{\text{B}}(t) + C_{\text{R}}(t) + \epsilon $$
+
+where $C_{B}(t)$ is the background concentration levels, $C_{R}(t)$ is the concentration due to indoor emissions and other contributions (e.g., outdoor concentration) and &epsilon is the normally distributed and independent errors.
+
+Any data points greater than a designated threshold relative to the background concentrations are classified as emissions:
+
+$$C_{\text{in}}(t) > \hat{C}_{\text{B}}(t) + \beta \times \sigma	$$
+where $\hat{C}_{B}(t)$ is the estimated background curve, $\sigma$ is the standard deviation of the data falling below the background curve. $\beta$ (= 3) is a user-defined parameter and controls the width of the threshold curve with higher values attributing to wider threshold concentrations.
+
+```{r}
+# application of the REBS methodology for detecting indoor emission events
+# find periods with more than 24 hours gap in the indoor concentrations. If those gaps exist split the data into chunks. This is performed in order to estimate as accurate as possible the background concetration
+beta <- 3
+sample.data.chunks <- sample.data %>% 
+  drop_na(pm2.5)
+timestamp.diff <- diff(pull(sample.data.chunks, 'timestamp'))
+timestamp.breaks <- which(timestamp.diff >= 24)
+#
+if (length(timestamp.breaks) != 0) {
+  end <- pull(sample.data.chunks, 'timestamp')[c(timestamp.breaks, nrow(sample.data.chunks))]
+  start <- pull(sample.data.chunks, 'timestamp')[c(1, timestamp.breaks + 1)]
+  sample.data.chunk.list <- vector('list', length(start))
+  for (i in 1:length(start)) {
+    sample.data.chunk.tbl <- sample.data.chunks %>% 
+        filter(timestamp >= start[i] & timestamp <= end[i])
+    sample.data.chunk.nona.tbl <- sample.data.chunk.tbl %>% 
+        dplyr::select(timestamp, pm2.5) %>%
+        tidyr::drop_na(pm2.5)
+    # apply the REBS method 
+    # extract tne background concentration
+    # extract the threshold =  background + beta * sigma
+    baseline <- rfbaseline(x=pull(sample.data.chunk.nona.tbl,'timestamp'),
+                           y=pull(sample.data.chunk.nona.tbl,'pm2.5'),
+                           span=2/3,NoXP=48,b=3.5)
+    sigma <- baseline$sigma
+    sample.data.chunk.nona.tbl <- sample.data.chunk.nona.tbl %>% 
+      mutate(background = baseline$fit,
+             threshold = background + beta*baseline$sigma)
+    sample.data.chunk.list[[i]] <- sample.data.chunk.nona.tbl
+  }
+  sample.data.nona <- bind_rows(sample.data.chunk.list) %>% as_tibble()
+  } else {
+    sample.data.nona <- sample.data %>% 
+      dplyr::select(timestamp, pm2.5) %>%
+      tidyr::drop_na(pm2.5)
+    baseline <- rfbaseline(x=pull(sample.data.nona,'timestamp'),
+                           y=pull(sample.data.nona,'pm2.5'),
+                           span=2/3,NoXP=48,b=3.5)
+    sigma <- baseline$sigma
+    sample.data.nona <- sample.data.nona %>% 
+      mutate(background = baseline$fit, 
+             threshold = background + beta*sigma)
+  }
+sample.data <- plyr::join(sample.data, sample.data.nona %>% dplyr::select(-pm2.5), by='timestamp') %>% as_tibble()
+sample.data <- sample.data %>% 
+  mutate(flag = if_else(pm2.5 > threshold, true='Emission Event', false = 'Non-Emission Event', missing=NA))
+#
+# time series of indoor, background amd threshold concentrations,  
+highchart(type = "stock") %>% 
+  hc_xAxis(type = "datetime") %>%
+  hc_yAxis(title = list(useHTML = TRUE, text = 'PM<sub>2.5</sub> (&mu;g m<sup>-3</sup>)'), opposite = FALSE) %>%
+  hc_add_series(name='Indoor PM<sub>2.5</sub>', data = sample.data, hcaes(x=datetime_to_timestamp(timestamp),y=pm2.5), type = "line", color='#0073C2FF') %>%
+  hc_add_series(name='Background PM<sub>2.5</sub>', data = sample.data, hcaes(x=datetime_to_timestamp(timestamp),y=background), type = "line", color= '#EFC000FF') %>% 
+  hc_add_series(name='Threshold PM<sub>2.5</sub>', data = sample.data, hcaes(x=datetime_to_timestamp(timestamp),y=threshold), type = "line", color= '#F21A00') %>% 
+  hc_tooltip(useHTML=TRUE, headerFormat = NULL, pointFormat = '{point.x:%Y-%m-%d %H:%M} <br> PM<sub>2.5</sub>: {point.y:.1f} &mu;g m<sup>-3</sup>') %>%
+  hc_legend(useHTML=TRUE, enabled = TRUE)
+#
+# boxplots of emission and non-emission events
+box.plots <- highchart() %>% 
+  hc_xAxis(type = "category") %>% 
+  hc_yAxis(title = list(useHTML = TRUE, text = 'PM<sub>2.5</sub> (&mu;g m<sup>-3</sup>)'), opposite = FALSE) %>%
+  hc_add_series_list(data_to_boxplot(data=sample.data %>% drop_na(pm2.5), variable=pm2.5, group_var=flag, add_outliers = FALSE)) %>% 
+  hc_colors(c('#0073C2FF')) %>%
+  hc_add_series(data = sample.data %>% drop_na(pm2.5), type = "scatter",hcaes(x = "flag", y = "pm2.5", group='flag')) %>% 
+  hc_plotOptions(scatter = list(color = "#EFC000FF", marker = list(radius = 3, symbol = "circle", lineWidth = 1),
+                                jitter = list(x=.2, y=0)),
+                 boxplot = list(lineWidth = 2, medianColor = 'black', medianWidth = 2)) %>%
+  hc_tooltip(useHTML=TRUE, headerFormat = NULL, pointFormat = 'PM<sub>2.5</sub>: {point.y:.1f} mu;gm<sup>-3</sup>') %>%  
+  hc_legend(useHTML = TRUE, enabled = FALSE)
+#
+# statistical densities
+density.non_emision <- density(pull(sample.data %>% drop_na(pm2.5) %>% filter(flag == 'Non-Emission Event'),'pm2.5'))
+density.non_emision <- data.frame(x = density.non_emision$x, y = density.non_emision$y)
+density.emision <- density(pull(sample.data %>% drop_na(pm2.5) %>% filter(flag == 'Emission Event'),'pm2.5'))
+density.emision <- data.frame(x = density.emision$x, y = density.emision$y)
+#
+density.plots <- highchart() %>%
+  hc_yAxis(title=list(useHTML = TRUE, text = 'Density')) %>%
+  hc_xAxis(title = list(useHTML = TRUE, text = 'PM<sub>2.5</sub> (&mu;g m<sup>-3</sup>)')) %>%
+  hc_add_series(data = density.emision, hcaes(x=x, y=y), type = "area", fillOpacity=0.3, color="#EFC000FF", name='Emission Event') %>% 
+  hc_add_series(data = density.non_emision, hcaes(x=x, y=y), type = "area", fillOpacity=0.3, color='#0073C2FF', name = 'Non-Emission Event') %>%   hc_tooltip(useHTML=TRUE, headerFormat = NULL, pointFormat = 'Density: {point.y: .3f}  <br> PM<sub>2.5</sub>: {point.x:.1f} &mu;g m<sup>-3</sup>') %>%
+  hc_legend(useHTML=TRUE, enabled = TRUE)
+#
+div(div(style = "display:inline-block; width: 48%;", box.plots), div(style = "display:inline-block; width: 48%;", density.plots))
+```
+
+## Infiltration factor using rolling statistics
+
+The infiltration factor, $f_{inf}$ characterizes the proportion of the outdoor particles infiltrated into indoor environments under the absence of potential emission events. $f_{inf}$ is calculated as:
+  
+$$f_{inf}(t) = \frac{\langle C_{\text{in}}(t)\rangle_{T}}{\langle C_{\text{out}}(t)\rangle_{T}}$$
+$$\langle C_{\text{in}}(t) \rangle_{T} = \frac{1}{T} \sum_{t_i-T+1}^{t_i} C_{\text{in}}(t) \quad \text{and} \quad \langle C_{\text{out}}(t) \rangle_{T} = \frac{1}{T} \sum_{t_i-T+1}^{t_i} C_{\text{out}}(t) \quad \text{with} \quad t \in [t_i-T+1, t_i] $$ 
+  where $\langle C_{\text{in}}(t) \rangle_{T}$ and $\langle C_{\text{out}}(t) \rangle_{T}$ are the $T$-hour rolling averages of indoor and outdoor PM<sub>2.5</sub> concentrations.  $f_{inf}$ is calculated considering only the timestamps that were not identified as indoor emission events and at least 30% data coverage within the $T$-hour window.
+
+```{r}
+# calculation of the infiltration factor using rolling statistics
+# pad with NA the indoor concentrations detected as emission events 
+sample.data <- sample.data %>% 
+  mutate(pm2.5_nonem = if_else(flag == 'Emission', true=NA, false= pm2.5, missing=NA))
+T_window = 48
+sample.data <- sample.data %>% 
+  mutate(pm2.5_roll = zoo::rollapply(pm2.5_nonem, width = T_window, FUN=function(x) mean(x,na.rm=TRUE), align='right', fill=NA), # rolling average for outdoor concentrations
+         pm2.5_out_roll = zoo::rollapply(pm2.5_out, width = T_window, FUN=function(x) mean(x,na.rm=TRUE), align='right', fill=NA), # rolling average for indoor concentrations
+         n_pm2.5_in_roll = zoo::rollapply(pm2.5_nonem, width=48, FUN=function(x) sum(!is.na(x)),align='right',fill=NA), # number of available indoor measurements
+         n_pm2.5_out_roll = zoo::rollapply(pm2.5_out, width=48, FUN=function(x) sum(!is.na(x)),align='right',fill=NA))  # number of available outdoor measurements
+sample.data <- sample.data %>% 
+  mutate(finf = ifelse(n_pm2.5_in_roll > 48/3 & n_pm2.5_out_roll > 48/3 &  pm2.5_roll < pm2.5_out_roll,
+                       pm2.5_roll/pm2.5_out_roll, NA), # data completeness criterion 
+         finf = na_interpolation(finf,option='linear',maxgap=3))
+sample.data <- sample.data %>% 
+  dplyr::select(-c(pm2.5_nonem, pm2.5_roll, pm2.5_out_roll, n_pm2.5_in_roll, n_pm2.5_out_roll))
+#
+# time series of the infiltration factor
+highchart(type = "stock") %>% 
+  hc_xAxis(type = "datetime") %>%
+  hc_yAxis(title = list(useHTML = TRUE, text = 'f<sub>inf</sub>'), opposite = FALSE) %>%
+  hc_add_series(data = sample.data, hcaes(x=datetime_to_timestamp(timestamp),y=finf), type = "line", color='#0073C2FF') %>%
+  hc_tooltip(useHTML=TRUE, headerFormat = NULL, pointFormat = '{point.x:%Y-%m-%d %H:%M} <br> PM<sub>2.5</sub>: {point.y:.1f} mu;gm<sup>-3</sup>') %>%
+  hc_legend(useHTML=TRUE, enabled = TRUE)
+#
+# time series of indoor and infiltrated concentrations
+sample.data <- sample.data %>% 
+  mutate(pm2.5_inf = round(finf*pm2.5_out,1))
+#
+highchart(type = "stock") %>% 
+  hc_xAxis(type = "datetime") %>%
+  hc_yAxis(title = list(useHTML = TRUE, text = 'PM<sub>2.5</sub> (&mu;g m<sup>-3</sup>)'), opposite = FALSE) %>%
+  hc_add_series(name='Indoor PM<sub>2.5</sub>', data = sample.data, hcaes(x=datetime_to_timestamp(timestamp),y=pm2.5), type = "line", color='#0073C2FF') %>%
+  hc_add_series(name='Outdoor-Infiltrated PM<sub>2.5</sub>', data = sample.data, hcaes(x=datetime_to_timestamp(timestamp),y=background), type = "line", color= '#EFC000FF') %>% 
+  hc_tooltip(useHTML=TRUE, headerFormat = NULL, pointFormat = '{point.x:%Y-%m-%d %H:%M} <br> PM<sub>2.5</sub>: {point.y:.1f} mu;gm<sup>-3</sup>') %>%
+  hc_legend(useHTML=TRUE, enabled = TRUE)
+#
+# Seasonal diurnal distribution of the infiltration factor
+highchart() %>% 
+  hc_xAxis(categories = as.character(pull(sample.data.diurnal, 'Hour')), title = list(text = "Hour of the Day")) %>%
+  hc_yAxis(title = list(useHTML = TRUE, text = 'f<sub>inf</sub>'), opposite = FALSE) %>%
+  hc_add_series_list(data_to_boxplot(data=sample.data %>% drop_na(pm2.5), variable=finf, group_var=Hour, group_var2=Period, add_outliers = FALSE)) %>% 
+  hc_colors(c('#0073C2FF', "#EFC000FF")) %>%
+  hc_tooltip(useHTML=TRUE, headerFormat = NULL, pointFormat = 'Hour: {point.x:.0f} <br> PM<sub>2.5</sub>: {point.y:.1f} mu;gm<sup>-3</sup>') %>% 
+  hc_legend(useHTML = TRUE, enabled = TRUE)
+```
