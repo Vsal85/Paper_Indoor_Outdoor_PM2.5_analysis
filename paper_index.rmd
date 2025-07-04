@@ -30,7 +30,7 @@ require(htmltools)
 ```
 
 This folder includes sample scripts to analyze the relationship between indoor and outdoor fine air particulate matter (PM<sub>2.5</sub>) collected using low-cost sensors (LCSs). 
-The generated results were partly presented in the paper <i>Citizen-Operated Low-Cost Sensors for Estimating Outdoor Particulate Matter Infiltration</i> submitted in npj | Climate and Atmospheric Science.
+The generated results were partly presented in the paper <i>Citizen-Operated Low-Cost Sensors for Estimating Outdoor Particulate Matter Infiltration</i> published in Springer | Air Quality, Atmosphere & Health.
 
 Finally, this document presents an explanation of the different analysis conducted.
 
